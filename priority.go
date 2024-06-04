@@ -1,0 +1,23 @@
+package bulwark
+
+// Priority determines the importance of a request in ascending order.
+// e.g. priority 0 is more important than priority 1.
+//
+// When a system reaches its capacity, it will sort requests by their priority
+// and process them. Lower-priority requests can either be delayed or dropped.
+type Priority int8
+
+// These are pre-defined priority levels that can be used, but any int value
+// can be used as a priority.
+const (
+	// Use High when for requests that require low latency
+	High Priority = 0
+	// Use Important for requests that are important to the overall experience
+	Important Priority = 1
+	// Use Medium for noncritical requests where an elevated latency or
+	// failure rate would not significantly impact the experience.
+	Medium Priority = 2
+	// Use Low for trivial requests and good for any system that can retry
+	// later when the system has spare capacity.
+	Low Priority = 3
+)
