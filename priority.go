@@ -1,5 +1,16 @@
 package bulwark
 
+// StandardPriorities is the number of priority levels that are available.
+// This value should be used when creating a new AdaptiveThrottle when the
+// default Priority constants are used.
+//
+//		throttler := bulwark.NewAdaptiveThrottle(bulwark.Priorities)
+//		_, err := bulwark.WithAdaptiveThrottle(throttler, bulwark.High, throttledFn)
+//		if err != nil {
+//			// handle the error
+//	 }
+const StandardPriorities = 4
+
 // Priority determines the importance of a request in ascending order.
 // e.g. priority 0 is more important than priority 1.
 //
