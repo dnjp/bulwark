@@ -77,14 +77,14 @@ When the system reaches capacity, Bulwark dynamically determines the probability
 This example shows Bulwark determining the priority of a request from the request `context` and will use `bulwark.Medium` by default when the context does not provide a value.
 
 ```go
-	priority := bulwark.PriorityFromContext(ctx, bulwark.Medium)
-	msg, err = bulwark.WithAdaptiveThrottle(throttle, priority, func() (string, error) {
-		// Call external service here...
-		return "World", nil
-	})
-	if err != nil {
-		// handle the error
-	}
+priority := bulwark.PriorityFromContext(ctx, bulwark.Medium)
+msg, err = bulwark.WithAdaptiveThrottle(throttle, priority, func() (string, error) {
+	// Call external service here...
+	return "World", nil
+})
+if err != nil {
+	// handle the error
+}
 ```
 
 ## Configuration
@@ -100,10 +100,10 @@ Higher values of `k` mean that the throttle will react more slowly when a backen
 > We generally prefer the 2x multiplier. By allowing more requests to reach the backend than are expected to actually be allowed, we waste more resources at the backend, but we also speed up the propagation of state from the backend to the clients. [Google SRE book]
 
 ```go
-	throttle := bulwark.NewAdaptiveThrottle(
-		bulwark.StandardPriorities,
-		bulwark.WithAdaptivethrottleatio(1.1),
-	)
+throttle := bulwark.NewAdaptiveThrottle(
+	bulwark.StandardPriorities,
+	bulwark.WithAdaptivethrottleatio(1.1),
+)
 ```
 
 ### Throttle minimum rate
@@ -111,10 +111,10 @@ Higher values of `k` mean that the throttle will react more slowly when a backen
 Configure the minimum number of requests per second that the adaptive throttle will allow (approximately) to reach the backend, **even if all requests are failing**. Sending a small number of requests to the backend is critical to continuously evaluate its health and tune the throttle.
 
 ```go
-	throttle := bulwark.NewAdaptiveThrottle(
-		bulwark.StandardPriorities,
-		bulwark.WithAdaptiveThrottleMinimumRate(0.5),
-	)
+throttle := bulwark.NewAdaptiveThrottle(
+	bulwark.StandardPriorities,
+	bulwark.WithAdaptiveThrottleMinimumRate(0.5),
+)
 ```
 
 ### Throttle window
@@ -126,10 +126,10 @@ A larger window will make the throttle react more slowly to changes in the backe
 By default, it uses a window of `1 * time.Minute`
 
 ```go
-	throttle := bulwark.NewAdaptiveThrottle(
-		bulwark.StandardPriorities,
-		bulwark.WithAdaptiveThrottleWindow(5 * time.Minute),
-	)
+throttle := bulwark.NewAdaptiveThrottle(
+	bulwark.StandardPriorities,
+	bulwark.WithAdaptiveThrottleWindow(5 * time.Minute),
+)
 ```
 
 ### Accepted errors
@@ -137,13 +137,13 @@ By default, it uses a window of `1 * time.Minute`
 Set the function that determines whether an error should be considered for the throttling. When the call to `fn` returns true, the error is NOT counted towards the throttling.
 
 ```go
-	isAcceptedErrors := func(err error) bool {
-		return errors.Is(err, context.Canceled) // || other conditions
-	}
-	throttle := bulwark.NewAdaptiveThrottle(
-		bulwark.StandardPriorities,
-		bulwark.WithAcceptedErrors(isAcceptedErrors),
-	)
+isAcceptedErrors := func(err error) bool {
+	return errors.Is(err, context.Canceled) // || other conditions
+}
+throttle := bulwark.NewAdaptiveThrottle(
+	bulwark.StandardPriorities,
+	bulwark.WithAcceptedErrors(isAcceptedErrors),
+)
 ```
 
 > Errors unrelated to resource constraints or a service's inability to handle traffic should be allowed. For instance, errors caused by invalid user requests or authentication failures should be accepted.
