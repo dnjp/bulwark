@@ -150,11 +150,11 @@ throttle := bulwark.NewAdaptiveThrottle(
 
 ## Inspirations
 
-Most reliability libraries in Go are either lack robust support for `context` propagation and cancellation and very few of them provide support for Quality of Service (QoS) prioritisation when services are under heavy load.
+Most reliability libraries in Go either lack robust support for `context` propagation and cancellation and very few provide support for Quality of Service (QoS) prioritisation when services are under heavy load.
 
 This gap inspired me to create this library. I started by building upon the `AdaptiveThrottle` implementation from `bradenaw/backpressure`, which provided the foundational concepts I needed. A big thank you to Braden Walker for his excellent work!
 
-The design of this library is also shaped by my own experiences managing failures in distributed systems, as well as insights drawn from the remarkable work done at Netflix and Google.
+The design of this library is also shaped by my experiences managing failures in distributed systems and insights drawn from the remarkable work done at Netflix and Google.
 
 ## Further reading
 
