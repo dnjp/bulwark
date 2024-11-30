@@ -40,7 +40,11 @@ func TestAdaptiveThrottleBasic(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for time.Since(start) < duration {
-				l.Wait(context.Background())
+				if err := l.Wait(context.Background()); err != nil {
+					t.Error("Wait returned an error", err)
+
+					return
+				}
 
 				requestsByPriority[i]++
 				_, _ = WithAdaptiveThrottle(clientThrottle, p, func() (struct{}, error) {
@@ -83,4 +87,86 @@ func TestAdaptiveThrottleBasic(t *testing.T) {
 	}
 	tw.Flush()
 	t.Log("\n" + sb.String())
+}
+
+// TestFallback ensures the fallback function is called when an execution is
+// rejected by the throttle.
+func TestFallback(t *testing.T) {
+	ctx := context.Background()
+	throttle := NewAdaptiveThrottle(StandardPriorities, WithAdaptiveThrottleRatio(1))
+	for i := 0; i < 100; i++ {
+		throttle.Throttle(ctx, 0, func(ctx context.Context) error {
+			return faults.Unavailable(0)
+		})
+	}
+
+	throttledFnCalls := 0
+	fallbackFnCalls := 0
+	throttle.Throttle(ctx, 0, func(ctx context.Context) error {
+		throttledFnCalls++
+
+		return nil
+	}, func(ctx context.Context) error {
+		fallbackFnCalls++
+
+		return nil
+	})
+
+	if throttledFnCalls != 0 {
+		t.Errorf("expected throttled function to not be called, got %d", throttledFnCalls)
+	}
+	if fallbackFnCalls != 1 {
+		t.Errorf("expected fallback function to be called once, got %d", fallbackFnCalls)
+	}
+}
+
+// This test ensures that no errors returned by the throttled function can
+// trigger the fallback function.
+func TestInvalidFallback(t *testing.T) {
+	stdError := errors.New("standard error")
+
+	table := []struct {
+		name   string
+		err    error
+		expect error
+	}{
+		{
+			name:   "No errors",
+			err:    nil,
+			expect: nil,
+		},
+		{
+			name:   "Error",
+			err:    DefaultClientSideRejectionError,
+			expect: DefaultClientSideRejectionError,
+		},
+		{
+			name:   "Wrapped error",
+			err:    RejectedError(faults.ResourceExhausted()),
+			expect: faults.ResourceExhausted(),
+		},
+		{
+			name:   "Standard error",
+			err:    stdError,
+			expect: stdError,
+		},
+	}
+
+	ctx := context.Background()
+
+	for _, tt := range table {
+		t.Run(tt.name, func(t *testing.T) {
+			throttle := NewAdaptiveThrottle(StandardPriorities)
+			err := throttle.Throttle(ctx, 0, func(ctx context.Context) error {
+				return tt.err
+			}, func(ctx context.Context) error {
+				t.Errorf("only client-side rejections should trigger a fallback")
+
+				return nil
+			})
+			if !errors.Is(err, tt.expect) {
+				t.Errorf("expected %v, got %v", tt.expect, err)
+			}
+		})
+	}
 }
