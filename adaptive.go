@@ -87,7 +87,7 @@ func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *Ada
 // `RejectedError`.
 //
 // If there are enough rejections within a given time window, further calls to
-// `Throttle` may begin returning `DefaultClientSideRejectionError` immediately
+// `Throttle` may begin returning `ClientSideRejectionError` immediately
 // without invoking `throttledFn`. Lower-priority requests are preferred to be
 // rejected first.
 func (t *AdaptiveThrottle) Throttle(
@@ -109,7 +109,7 @@ func (t *AdaptiveThrottle) Throttle(
 			return fallbackFn[0](ctx)
 		}
 
-		return DefaultClientSideRejectionError
+		return ClientSideRejectionError
 	}
 
 	err := fn(ctx)
@@ -231,8 +231,8 @@ func WithAcceptedErrors(fn func(err error) bool) AdaptiveThrottleOption {
 }
 
 func Throttle[T any](
-	at *AdaptiveThrottle,
 	ctx context.Context,
+	at *AdaptiveThrottle,
 	defaultPriority Priority,
 	throttledFn throttledArgsFn[T],
 	fallbackFn ...throttledArgsFn[T],
@@ -254,7 +254,7 @@ func Throttle[T any](
 			return fallbackFn[0](ctx)
 		}
 
-		return zero, DefaultClientSideRejectionError
+		return zero, ClientSideRejectionError
 	}
 
 	t, err := throttledFn(ctx)
@@ -303,7 +303,7 @@ func WithAdaptiveThrottle[T any](
 		at.reject(priority, now)
 		var zero T
 
-		return zero, DefaultClientSideRejectionError
+		return zero, ClientSideRejectionError
 	}
 
 	t, err := throttledFn()
@@ -359,7 +359,7 @@ type (
 )
 
 var (
-	// Deprecated: Use RejectedErrors instead.
+	// Deprecated: Override `IsRejectedError` instead and/or wrap errors with `RejectedError`.
 	//
 	// DefaultAcceptedErrors is the default function used to determine whether
 	// an error should be considered for the throttling.
@@ -379,9 +379,14 @@ var (
 		return faults.IsUnavailable(err) ||
 			faults.IsResourceExhausted(err)
 	}
+	// Deprecated: Use `ClientSideRejectionError` instead.
+	//
 	// DefaultClientSideRejectionError is the default error returned when the
 	// client rejects the request due to the adaptive throttle.
 	DefaultClientSideRejectionError = faults.Unavailable(time.Second)
+	// ClientSideRejectionError is the error returned when the client rejects the
+	// request due to the adaptive throttle.
+	ClientSideRejectionError = DefaultClientSideRejectionError
 	// IsRejectedError is a global function that determines whether an error
 	// should be considered for the throttling. Any error that indicates that the
 	// backend is unhealthy should be considered for the throttling.
