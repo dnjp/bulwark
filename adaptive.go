@@ -3,12 +3,24 @@ package bulwark
 import (
 	"context"
 	"errors"
-	"math"
 	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/deixis/faults"
+)
+
+const (
+	// K is the default accept multiplier, which is used to determine the number
+	// of requests that are allowed to reach the backend.
+	//
+	// A value of 2 means that the throttle will allow twice as many requests to
+	// actually reach the backend as it believes will succeed.
+	K = 2
+	// MinRPS is the minimum number of requests per second that the adaptive
+	// throttle will allow (approximately) through to the upstream, even if every
+	// request is failing.
+	MinRPS = 1
 )
 
 // AdaptiveThrottle is used in a client to throttle requests to a backend as it becomes unhealthy to
@@ -25,14 +37,147 @@ import (
 //
 // More on adaptive throttles in https://sre.google/sre-book/handling-overload/
 type AdaptiveThrottle struct {
+	m sync.Mutex
+
 	k            float64
 	minPerWindow float64
-	// isErrorAccepted returns true when the error should not be counted towards the throttling.
-	isErrorAccepted func(error) bool
 
-	m        sync.Mutex
 	requests []windowedCounter
 	accepts  []windowedCounter
+}
+
+// NewAdaptiveThrottle returns an AdaptiveThrottle.
+//
+// priorities is the number of priorities that the throttle will accept. Giving a priority outside
+// of `[0, priorities)` will panic.
+func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *AdaptiveThrottle {
+	opts := adaptiveThrottleOptions{
+		d:       time.Minute,
+		k:       K,
+		minRate: MinRPS,
+	}
+	for _, option := range options {
+		option.f(&opts)
+	}
+
+	now := Now()
+	requests := make([]windowedCounter, priorities)
+	accepts := make([]windowedCounter, priorities)
+	for i := range requests {
+		requests[i] = newWindowedCounter(now, opts.d/10, 10)
+		accepts[i] = newWindowedCounter(now, opts.d/10, 10)
+	}
+
+	return &AdaptiveThrottle{
+		k:            opts.k,
+		requests:     requests,
+		accepts:      accepts,
+		minPerWindow: opts.minRate * opts.d.Seconds(),
+	}
+}
+
+// Throttle sends a request to the backend when the adaptive throttle allows it.
+// The request is throttled based on the priority of the request.
+//
+// The default priority is used when the given `ctx` does not have a priority set.
+// The `ctx` can set the priority using `WithPriority`.
+//
+// When `throttledFn` returns an error, the error is considered as a rejection
+// when `isErrorAccepted` returns false or when the error is wrapped in a
+// `RejectedError`.
+//
+// If there are enough rejections within a given time window, further calls to
+// `Throttle` may begin returning `ClientSideRejectionError` immediately
+// without invoking `throttledFn`. Lower-priority requests are preferred to be
+// rejected first.
+func (t *AdaptiveThrottle) Throttle(
+	ctx context.Context, defaultPriority Priority, fn throttledFn, fallbackFn ...fallbackFn,
+) error {
+	priority := PriorityFromContext(ctx, defaultPriority)
+	now := Now()
+	rejectionProbability := t.rejectionProbability(priority, now)
+	if rand.Float64() < rejectionProbability {
+		// As Bulwark starts rejecting requests, requests will continue to exceed
+		// accepts. While it may seem counterintuitive, given that locally rejected
+		// requests aren't actually propagated, this is the preferred behavior. As the
+		// rate at which the application attempts requests to Bulwark grows
+		// (relative to the rate at which the backend accepts them), we want to
+		// increase the probability of dropping new requests.
+		t.reject(priority, now)
+
+		if len(fallbackFn) > 0 {
+			return fallbackFn[0](ctx, ClientSideRejectionError, true)
+		}
+
+		return ClientSideRejectionError
+	}
+
+	err := fn(ctx)
+
+	now = Now()
+	switch {
+	case err == nil:
+		t.accept(priority, now)
+	case errors.Is(err, errRejected{}):
+		// Unwrap error to return the original error to the caller
+		err = err.(errRejected).inner
+
+		fallthrough
+	case IsRejectedError(err):
+		t.reject(priority, now)
+	default:
+		t.accept(priority, now)
+	}
+
+	if err != nil && len(fallbackFn) > 0 {
+		return fallbackFn[0](ctx, err, false)
+	}
+
+	return err
+}
+
+// rejectionProbability returns the probability that a request of the given
+// priority will be rejected. The result is clamped to the range [0, 1].
+//
+// It uses the formula from https://sre.google/sre-book/handling-overload/ to
+// calculate the probability that a request will be rejected. The formula is:
+//
+//	clamp(0, (requests - k * accepts) / (requests + minPerWindow), 1)
+//
+// Where:
+//   - requests is the number of requests of the given priority in the last d time window.
+//   - accepts is the number of requests of the given priority that were accepted in the last d time
+//     window.
+//   - k is the ratio of the measured success rate and the rate that the throttle will admit.
+//   - minPerWindow is the minimum number of requests per second that the adaptive throttle will allow
+//     (approximately) through to the upstream, even if every request is failing.
+func (t *AdaptiveThrottle) rejectionProbability(p Priority, now time.Time) float64 {
+	t.m.Lock()
+	requests := float64(t.requests[int(p)].get(now))
+	accepts := float64(t.accepts[int(p)].get(now))
+	for i := 0; i < int(p); i++ {
+		// Also count non-accepted requests for every higher priority as
+		// non-accepted for this priority.
+		requests += float64(t.requests[i].get(now) - t.accepts[i].get(now))
+	}
+	t.m.Unlock()
+
+	return clamp(0, (requests-t.k*accepts)/(requests+t.minPerWindow), 1)
+}
+
+// accept records that a request of the given priority was accepted.
+func (t *AdaptiveThrottle) accept(p Priority, now time.Time) {
+	t.m.Lock()
+	t.requests[int(p)].add(now, 1)
+	t.accepts[int(p)].add(now, 1)
+	t.m.Unlock()
+}
+
+// reject records that a request of the given priority was rejected.
+func (t *AdaptiveThrottle) reject(p Priority, now time.Time) {
+	t.m.Lock()
+	t.requests[int(p)].add(now, 1)
+	t.m.Unlock()
 }
 
 // Additional options for the AdaptiveThrottle type. These options do not frequently need to be
@@ -78,6 +223,8 @@ func WithAdaptiveThrottleWindow(d time.Duration) AdaptiveThrottleOption {
 	}}
 }
 
+// Deprecated: Wrap errors with RejectedError instead and use the global DefaultRejectedErrors.
+//
 // WithAcceptedErrors sets the function that determines whether an error should
 // be considered for the throttling. When the call to fn returns true, the error
 // is not counted towards the throttling.
@@ -87,36 +234,55 @@ func WithAcceptedErrors(fn func(err error) bool) AdaptiveThrottleOption {
 	}}
 }
 
-// NewAdaptiveThrottle returns an AdaptiveThrottle.
-//
-// priorities is the number of priorities that the throttle will accept. Giving a priority outside
-// of `[0, priorities)` will panic.
-func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *AdaptiveThrottle {
-	opts := adaptiveThrottleOptions{
-		d:               time.Minute,
-		k:               2,
-		minRate:         1,
-		isErrorAccepted: DefaultAcceptedErrors,
-	}
-	for _, option := range options {
-		option.f(&opts)
+func Throttle[T any](
+	ctx context.Context,
+	at *AdaptiveThrottle,
+	defaultPriority Priority,
+	throttledFn throttledArgsFn[T],
+	fallbackFn ...fallbackArgsFn[T],
+) (T, error) {
+	priority := PriorityFromContext(ctx, defaultPriority)
+	now := Now()
+	rejectionProbability := at.rejectionProbability(priority, now)
+	if rand.Float64() < rejectionProbability {
+		// As Bulwark starts rejecting requests, requests will continue to exceed
+		// accepts. While it may seem counterintuitive, given that locally rejected
+		// requests aren't actually propagated, this is the preferred behavior. As the
+		// rate at which the application attempts requests to Bulwark grows
+		// (relative to the rate at which the backend accepts them), we want to
+		// increase the probability of dropping new requests.
+		at.reject(priority, now)
+		var zero T
+
+		if len(fallbackFn) > 0 {
+			return fallbackFn[0](ctx, ClientSideRejectionError, true)
+		}
+
+		return zero, ClientSideRejectionError
 	}
 
-	now := time.Now()
-	requests := make([]windowedCounter, priorities)
-	accepts := make([]windowedCounter, priorities)
-	for i := range requests {
-		requests[i] = newWindowedCounter(now, opts.d/10, 10)
-		accepts[i] = newWindowedCounter(now, opts.d/10, 10)
+	t, err := throttledFn(ctx)
+
+	now = Now()
+	switch {
+	case err == nil:
+		at.accept(priority, now)
+	case errors.Is(err, errRejected{}):
+		// Unwrap error to return the original error to the caller
+		err = err.(errRejected).inner
+
+		fallthrough
+	case IsRejectedError(err):
+		at.reject(priority, now)
+	default:
+		at.accept(priority, now)
 	}
 
-	return &AdaptiveThrottle{
-		k:               opts.k,
-		requests:        requests,
-		accepts:         accepts,
-		minPerWindow:    opts.minRate * opts.d.Seconds(),
-		isErrorAccepted: opts.isErrorAccepted,
+	if err != nil && len(fallbackFn) > 0 {
+		return fallbackFn[0](ctx, err, false)
 	}
+
+	return t, err
 }
 
 // WithAdaptiveThrottle is used to send a request to a backend using the given AdaptiveThrottle for
@@ -130,53 +296,79 @@ func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *Ada
 // WithAdaptiveThrottle will prefer to reject lower-priority requests if it can.
 func WithAdaptiveThrottle[T any](
 	at *AdaptiveThrottle,
-	p Priority,
-	f func() (T, error),
+	priority Priority,
+	throttledFn func() (T, error),
 ) (T, error) {
-	now := time.Now()
-
-	// Lifted rather directly from https://sre.google/sre-book/handling-overload/, with two
-	// extensions:
-	// - We count higher priorities' non-accepts as non-accepts, since we're trying to estimate
-	//   roughly how many requests we can send through without causing rejections for higher
-	//   priorities.
-	// - minPerWindow is configurable, in the book it's always 1 meaning ~1 QPS is the minimum
-	//   allowed.
-	at.m.Lock()
-	requests := float64(at.requests[int(p)].get(now))
-	accepts := float64(at.accepts[int(p)].get(now))
-	for i := 0; i < int(p); i++ {
-		// Also count non-accepted requests for every higher priority as non-accepted for this
-		// priority.
-		requests += float64(at.requests[i].get(now) - at.accepts[i].get(now))
-	}
-	at.m.Unlock()
-
-	rejectionProbability := math.Max(0, (requests-at.k*accepts)/(requests+at.minPerWindow))
-
+	now := Now()
+	rejectionProbability := at.rejectionProbability(priority, now)
 	if rand.Float64() < rejectionProbability {
+		// As Bulwark starts rejecting requests, requests will continue to exceed
+		// accepts. While it may seem counterintuitive, given that locally rejected
+		// requests aren't actually propagated, this is the preferred behavior. As the
+		// rate at which the application attempts requests to Bulwark grows
+		// (relative to the rate at which the backend accepts them), we want to
+		// increase the probability of dropping new requests.
+		at.reject(priority, now)
 		var zero T
-		at.m.Lock()
-		at.requests[int(p)].add(now, 1)
-		at.m.Unlock()
 
-		return zero, DefaultClientSideRejectionError
+		return zero, ClientSideRejectionError
 	}
 
-	t, err := f()
+	t, err := throttledFn()
 
-	now = time.Now()
-	at.m.Lock()
-	at.requests[int(p)].add(now, 1)
-	if err == nil || at.isErrorAccepted(err) {
-		at.accepts[int(p)].add(now, 1)
+	now = Now()
+	switch {
+	case err == nil:
+		at.accept(priority, now)
+	case errors.Is(err, errRejected{}):
+		at.reject(priority, now)
+
+		// Unwrap error to return the original error to the caller
+		err = err.(errRejected).inner
+	case IsRejectedError(err):
+		at.reject(priority, now)
+	default:
+		at.accept(priority, now)
 	}
-	at.m.Unlock()
 
 	return t, err
 }
 
+// RejectedError wraps an error to indicate that the error should be considered
+// for the throttling.
+//
+// Any error that indicates that the backend is unhealthy should be wrapped with
+// `RejectedError`. But other errors, such as bad requests, authentication failures,
+// pre-condition failures, etc., should not be wrapped with `RejectedError`.
+func RejectedError(err error) error { return errRejected{inner: err} }
+
+type errRejected struct{ inner error }
+
+func (err errRejected) Error() string { return err.inner.Error() }
+func (err errRejected) Unwrap() error { return err.inner }
+
+// clamp clamps x to the range [min, max].
+func clamp(min, x, max float64) float64 {
+	if x < min {
+		return min
+	}
+	if x > max {
+		return max
+	}
+
+	return x
+}
+
+type (
+	throttledFn            func(ctx context.Context) error
+	fallbackFn             func(ctx context.Context, err error, local bool) error
+	throttledArgsFn[T any] func(ctx context.Context) (T, error)
+	fallbackArgsFn[T any]  func(ctx context.Context, err error, local bool) (T, error)
+)
+
 var (
+	// Deprecated: Override `IsRejectedError` instead and/or wrap errors with `RejectedError`.
+	//
 	// DefaultAcceptedErrors is the default function used to determine whether
 	// an error should be considered for the throttling.
 	DefaultAcceptedErrors = func(err error) bool {
@@ -189,8 +381,29 @@ var (
 			faults.IsFailedPrecondition(err) ||
 			faults.IsUnimplemented(err)
 	}
-
+	// DefaultRejectedError is the default function used to determine whether
+	// an error should be considered for the throttling.
+	DefaultRejectedError = func(err error) bool {
+		return faults.IsUnavailable(err) ||
+			faults.IsResourceExhausted(err)
+	}
+	// Deprecated: Use `ClientSideRejectionError` instead.
+	//
 	// DefaultClientSideRejectionError is the default error returned when the
 	// client rejects the request due to the adaptive throttle.
 	DefaultClientSideRejectionError = faults.Unavailable(time.Second)
+	// ClientSideRejectionError is the error returned when the client rejects the
+	// request due to the adaptive throttle.
+	ClientSideRejectionError = DefaultClientSideRejectionError
+	// IsRejectedError is a global function that determines whether an error
+	// should be considered for the throttling. Any error that indicates that the
+	// backend is unhealthy should be considered for the throttling.
+	//
+	// This function can be overridden to customise the behaviour of Bulwark.
+	// For example, it is possible to use a whitelist of errors that should be
+	// accepted and reject the rest.
+	IsRejectedError = DefaultRejectedError
+	// Now returns the current time. It is a variable to allow tests to override
+	// the current time.
+	Now = time.Now
 )

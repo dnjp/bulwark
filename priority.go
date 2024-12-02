@@ -21,9 +21,9 @@ type Priority int8
 // These are pre-defined priority levels that can be used, but any int value
 // can be used as a priority.
 const (
-	// Use High when for requests that require low latency
+	// Use High when for requests that are critical to the overall experience.
 	High Priority = 0
-	// Use Important for requests that are important to the overall experience
+	// Use Important for requests that are important, but not critical.
 	Important Priority = 1
 	// Use Medium for noncritical requests where an elevated latency or
 	// failure rate would not significantly impact the experience.
