@@ -203,8 +203,13 @@ Fallbacks are particularly valuable in scenarios where partial functionality is 
 msg, err := bulwark.Throttle(ctx, throttle, bulwark.Medium, func(ctx context.Context) (string, error) {
 	// Call external service here...
 	return "call", nil
-}, func(ctx context.Context) (string, error) {
-	// Or call this alternative path when the system is overloaded
+}, func(ctx context.Context, err error, local bool) (string, error) {
+	if local {
+		// Bulwark rejected the request
+	} else {
+		// Error returned from the main function
+	}
+
 	return "fallback", nil
 })
 if err != nil {
@@ -212,7 +217,7 @@ if err != nil {
 }
 ```
 
-> 💡 The fallback function is invoked only when the main function is skipped due to throttling. If the main function executes but returns an error, the fallback is not triggered.
+> 💡 The fallback function is invoked when the main function returned an error or was skipped due to throttling.
 
 ## Priority
 

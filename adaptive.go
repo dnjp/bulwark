@@ -91,7 +91,7 @@ func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *Ada
 // without invoking `throttledFn`. Lower-priority requests are preferred to be
 // rejected first.
 func (t *AdaptiveThrottle) Throttle(
-	ctx context.Context, defaultPriority Priority, fn throttledFn, fallbackFn ...throttledFn,
+	ctx context.Context, defaultPriority Priority, fn throttledFn, fallbackFn ...fallbackFn,
 ) error {
 	priority := PriorityFromContext(ctx, defaultPriority)
 	now := Now()
@@ -106,7 +106,7 @@ func (t *AdaptiveThrottle) Throttle(
 		t.reject(priority, now)
 
 		if len(fallbackFn) > 0 {
-			return fallbackFn[0](ctx)
+			return fallbackFn[0](ctx, ClientSideRejectionError, true)
 		}
 
 		return ClientSideRejectionError
@@ -127,6 +127,10 @@ func (t *AdaptiveThrottle) Throttle(
 		t.reject(priority, now)
 	default:
 		t.accept(priority, now)
+	}
+
+	if err != nil && len(fallbackFn) > 0 {
+		return fallbackFn[0](ctx, err, false)
 	}
 
 	return err
@@ -235,7 +239,7 @@ func Throttle[T any](
 	at *AdaptiveThrottle,
 	defaultPriority Priority,
 	throttledFn throttledArgsFn[T],
-	fallbackFn ...throttledArgsFn[T],
+	fallbackFn ...fallbackArgsFn[T],
 ) (T, error) {
 	priority := PriorityFromContext(ctx, defaultPriority)
 	now := Now()
@@ -251,7 +255,7 @@ func Throttle[T any](
 		var zero T
 
 		if len(fallbackFn) > 0 {
-			return fallbackFn[0](ctx)
+			return fallbackFn[0](ctx, ClientSideRejectionError, true)
 		}
 
 		return zero, ClientSideRejectionError
@@ -272,6 +276,10 @@ func Throttle[T any](
 		at.reject(priority, now)
 	default:
 		at.accept(priority, now)
+	}
+
+	if err != nil && len(fallbackFn) > 0 {
+		return fallbackFn[0](ctx, err, false)
 	}
 
 	return t, err
@@ -353,9 +361,9 @@ func clamp(min, x, max float64) float64 {
 
 type (
 	throttledFn            func(ctx context.Context) error
-	fallbackFn             func(ctx context.Context, err error) error
+	fallbackFn             func(ctx context.Context, err error, local bool) error
 	throttledArgsFn[T any] func(ctx context.Context) (T, error)
-	fallbackArgsFn[T any]  func(ctx context.Context, err error) (T, error)
+	fallbackArgsFn[T any]  func(ctx context.Context, err error, local bool) (T, error)
 )
 
 var (

@@ -106,10 +106,10 @@ func TestFallback(t *testing.T) {
 		throttledFnCalls++
 
 		return nil
-	}, func(ctx context.Context) error {
+	}, func(ctx context.Context, err error, local bool) error {
 		fallbackFnCalls++
 
-		return nil
+		return err
 	})
 
 	if throttledFnCalls != 0 {
@@ -159,10 +159,8 @@ func TestInvalidFallback(t *testing.T) {
 			throttle := NewAdaptiveThrottle(StandardPriorities)
 			err := throttle.Throttle(ctx, 0, func(ctx context.Context) error {
 				return tt.err
-			}, func(ctx context.Context) error {
-				t.Errorf("only client-side rejections should trigger a fallback")
-
-				return nil
+			}, func(ctx context.Context, err error, local bool) error {
+				return err
 			})
 			if !errors.Is(err, tt.expect) {
 				t.Errorf("expected %v, got %v", tt.expect, err)
