@@ -346,6 +346,11 @@ type errRejected struct{ inner error }
 
 func (err errRejected) Error() string { return err.inner.Error() }
 func (err errRejected) Unwrap() error { return err.inner }
+func (err errRejected) Is(target error) bool {
+	_, ok := target.(errRejected)
+
+	return ok
+}
 
 // clamp clamps x to the range [min, max].
 func clamp(min, x, max float64) float64 {
