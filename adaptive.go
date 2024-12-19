@@ -42,15 +42,16 @@ type AdaptiveThrottle struct {
 	k            float64
 	minPerWindow float64
 
-	requests []windowedCounter
-	accepts  []windowedCounter
+	priorities PriorityRange
+	requests   []windowedCounter
+	accepts    []windowedCounter
 }
 
 // NewAdaptiveThrottle returns an AdaptiveThrottle.
 //
 // priorities is the number of priorities that the throttle will accept. Giving a priority outside
 // of `[0, priorities)` will panic.
-func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *AdaptiveThrottle {
+func NewAdaptiveThrottle(priorities PriorityRange, options ...AdaptiveThrottleOption) *AdaptiveThrottle {
 	opts := adaptiveThrottleOptions{
 		d:       time.Minute,
 		k:       K,
@@ -61,8 +62,8 @@ func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *Ada
 	}
 
 	now := Now()
-	requests := make([]windowedCounter, priorities)
-	accepts := make([]windowedCounter, priorities)
+	requests := make([]windowedCounter, priorities.Range())
+	accepts := make([]windowedCounter, priorities.Range())
 	for i := range requests {
 		requests[i] = newWindowedCounter(now, opts.d/10, 10)
 		accepts[i] = newWindowedCounter(now, opts.d/10, 10)
@@ -72,6 +73,7 @@ func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *Ada
 		k:            opts.k,
 		requests:     requests,
 		accepts:      accepts,
+		priorities:   priorities,
 		minPerWindow: opts.minRate * opts.d.Seconds(),
 	}
 }
@@ -93,7 +95,7 @@ func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *Ada
 func (t *AdaptiveThrottle) Throttle(
 	ctx context.Context, defaultPriority Priority, fn throttledFn, fallbackFn ...fallbackFn,
 ) error {
-	priority := PriorityFromContext(ctx, defaultPriority)
+	priority := t.priority(PriorityFromContext(ctx, defaultPriority))
 	now := Now()
 	rejectionProbability := t.rejectionProbability(priority, now)
 	if rand.Float64() < rejectionProbability {
@@ -153,9 +155,9 @@ func (t *AdaptiveThrottle) Throttle(
 //     (approximately) through to the upstream, even if every request is failing.
 func (t *AdaptiveThrottle) rejectionProbability(p Priority, now time.Time) float64 {
 	t.m.Lock()
-	requests := float64(t.requests[int(p)].get(now))
-	accepts := float64(t.accepts[int(p)].get(now))
-	for i := 0; i < int(p); i++ {
+	requests := float64(t.requests[p.Value()].get(now))
+	accepts := float64(t.accepts[p.Value()].get(now))
+	for i := 0; i < p.Value(); i++ {
 		// Also count non-accepted requests for every higher priority as
 		// non-accepted for this priority.
 		requests += float64(t.requests[i].get(now) - t.accepts[i].get(now))
@@ -168,16 +170,25 @@ func (t *AdaptiveThrottle) rejectionProbability(p Priority, now time.Time) float
 // accept records that a request of the given priority was accepted.
 func (t *AdaptiveThrottle) accept(p Priority, now time.Time) {
 	t.m.Lock()
-	t.requests[int(p)].add(now, 1)
-	t.accepts[int(p)].add(now, 1)
+	t.requests[p.Value()].add(now, 1)
+	t.accepts[p.Value()].add(now, 1)
 	t.m.Unlock()
 }
 
 // reject records that a request of the given priority was rejected.
 func (t *AdaptiveThrottle) reject(p Priority, now time.Time) {
 	t.m.Lock()
-	t.requests[int(p)].add(now, 1)
+	t.requests[p.Value()].add(now, 1)
 	t.m.Unlock()
+}
+
+func (t *AdaptiveThrottle) priority(p Priority) Priority {
+	newp, err := t.priorities.Normalize(p)
+	if err != nil {
+		// TODO: handle
+	}
+
+	return newp
 }
 
 // Additional options for the AdaptiveThrottle type. These options do not frequently need to be
@@ -241,7 +252,7 @@ func Throttle[T any](
 	throttledFn throttledArgsFn[T],
 	fallbackFn ...fallbackArgsFn[T],
 ) (T, error) {
-	priority := PriorityFromContext(ctx, defaultPriority)
+	priority := at.priority(PriorityFromContext(ctx, defaultPriority))
 	now := Now()
 	rejectionProbability := at.rejectionProbability(priority, now)
 	if rand.Float64() < rejectionProbability {
