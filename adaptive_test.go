@@ -26,14 +26,18 @@ func TestAdaptiveThrottleBasic(t *testing.T) {
 
 	serverLimiter := backpressure.NewRateLimiter(len(demandRates), supplyRate, supplyRate)
 
-	clientThrottle := NewAdaptiveThrottle(len(demandRates), WithAdaptiveThrottleWindow(3*time.Second))
+	priorities, err := NewCorrectiveRange(High, PriorityFromInt(len(demandRates)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientThrottle := NewAdaptiveThrottle(priorities, WithAdaptiveThrottleWindow(3*time.Second))
 
 	var wg sync.WaitGroup
 	requestsByPriority := make([]int, len(demandRates))
 	sentByPriority := make([]int, len(demandRates))
 	for i, r := range demandRates {
 		i := i
-		p := Priority(i)
+		p := PriorityFromInt(i)
 		l := rate.NewLimiter(rate.Limit(r), r)
 
 		wg.Add(1)
@@ -49,7 +53,7 @@ func TestAdaptiveThrottleBasic(t *testing.T) {
 				requestsByPriority[i]++
 				_, _ = WithAdaptiveThrottle(clientThrottle, p, func() (struct{}, error) {
 					sentByPriority[i]++
-					err := serverLimiter.Wait(context.Background(), backpressure.Priority(p), 1)
+					err := serverLimiter.Wait(context.Background(), backpressure.Priority(p.Value()), 1)
 					if err != nil {
 						return struct{}{}, err
 					}
@@ -95,14 +99,14 @@ func TestFallback(t *testing.T) {
 	ctx := context.Background()
 	throttle := NewAdaptiveThrottle(StandardPriorities, WithAdaptiveThrottleRatio(1))
 	for i := 0; i < 100; i++ {
-		throttle.Throttle(ctx, 0, func(ctx context.Context) error {
+		throttle.Throttle(ctx, High, func(ctx context.Context) error {
 			return faults.Unavailable(0)
 		})
 	}
 
 	throttledFnCalls := 0
 	fallbackFnCalls := 0
-	throttle.Throttle(ctx, 0, func(ctx context.Context) error {
+	throttle.Throttle(ctx, High, func(ctx context.Context) error {
 		throttledFnCalls++
 
 		return nil
@@ -157,7 +161,7 @@ func TestInvalidFallback(t *testing.T) {
 	for _, tt := range table {
 		t.Run(tt.name, func(t *testing.T) {
 			throttle := NewAdaptiveThrottle(StandardPriorities)
-			err := throttle.Throttle(ctx, 0, func(ctx context.Context) error {
+			err := throttle.Throttle(ctx, High, func(ctx context.Context) error {
 				return tt.err
 			}, func(ctx context.Context, err error, local bool) error {
 				return err
