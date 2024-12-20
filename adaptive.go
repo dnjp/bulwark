@@ -42,21 +42,16 @@ type AdaptiveThrottle struct {
 	k            float64
 	minPerWindow float64
 
-	priorities int
+	priorities PriorityRange
 	requests   []windowedCounter
 	accepts    []windowedCounter
-	validate   func(p Priority, priorities int) (Priority, error)
 }
 
 // NewAdaptiveThrottle returns an AdaptiveThrottle.
 //
 // priorities is the number of priorities that the throttle will accept. Giving a priority outside
 // of `[0, priorities)` will panic.
-func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *AdaptiveThrottle {
-	if priorities <= 0 {
-		panic("bulwark: priorities must be greater than 0")
-	}
-
+func NewAdaptiveThrottle(priorities PriorityRange, options ...AdaptiveThrottleOption) *AdaptiveThrottle {
 	opts := adaptiveThrottleOptions{
 		d:       time.Minute,
 		k:       K,
@@ -67,8 +62,8 @@ func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *Ada
 	}
 
 	now := Now()
-	requests := make([]windowedCounter, priorities)
-	accepts := make([]windowedCounter, priorities)
+	requests := make([]windowedCounter, priorities.Range())
+	accepts := make([]windowedCounter, priorities.Range())
 	for i := range requests {
 		requests[i] = newWindowedCounter(now, opts.d/10, 10)
 		accepts[i] = newWindowedCounter(now, opts.d/10, 10)
@@ -80,7 +75,6 @@ func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *Ada
 		requests:     requests,
 		accepts:      accepts,
 		minPerWindow: opts.minRate * opts.d.Seconds(),
-		validate:     OnInvalidPriorityAdjust,
 	}
 }
 
@@ -101,7 +95,7 @@ func NewAdaptiveThrottle(priorities int, options ...AdaptiveThrottleOption) *Ada
 func (t *AdaptiveThrottle) Throttle(
 	ctx context.Context, defaultPriority Priority, fn throttledFn, fallbackFn ...fallbackFn,
 ) error {
-	priority, err := t.validate(PriorityFromContext(ctx, defaultPriority), t.priorities)
+	priority, err := t.priorities.Validate(PriorityFromContext(ctx, defaultPriority))
 	if err != nil {
 		return err
 	}
@@ -165,9 +159,9 @@ func (t *AdaptiveThrottle) Throttle(
 //     (approximately) through to the upstream, even if every request is failing.
 func (t *AdaptiveThrottle) rejectionProbability(p Priority, now time.Time) float64 {
 	t.m.Lock()
-	requests := float64(t.requests[int(p)].get(now))
-	accepts := float64(t.accepts[int(p)].get(now))
-	for i := 0; i < int(p); i++ {
+	requests := float64(t.requests[p.Value()].get(now))
+	accepts := float64(t.accepts[p.Value()].get(now))
+	for i := 0; i < p.Value(); i++ {
 		// Also count non-accepted requests for every higher priority as
 		// non-accepted for this priority.
 		requests += float64(t.requests[i].get(now) - t.accepts[i].get(now))
@@ -180,15 +174,15 @@ func (t *AdaptiveThrottle) rejectionProbability(p Priority, now time.Time) float
 // accept records that a request of the given priority was accepted.
 func (t *AdaptiveThrottle) accept(p Priority, now time.Time) {
 	t.m.Lock()
-	t.requests[int(p)].add(now, 1)
-	t.accepts[int(p)].add(now, 1)
+	t.requests[p.Value()].add(now, 1)
+	t.accepts[p.Value()].add(now, 1)
 	t.m.Unlock()
 }
 
 // reject records that a request of the given priority was rejected.
 func (t *AdaptiveThrottle) reject(p Priority, now time.Time) {
 	t.m.Lock()
-	t.requests[int(p)].add(now, 1)
+	t.requests[p.Value()].add(now, 1)
 	t.m.Unlock()
 }
 
@@ -203,7 +197,6 @@ type adaptiveThrottleOptions struct {
 	minRate         float64
 	d               time.Duration
 	isErrorAccepted func(err error) bool
-	validate        func(p Priority, priorities int) (Priority, error)
 }
 
 // WithAdaptiveThrottleRatio sets the ratio of the measured success rate and the rate that the throttle
@@ -247,26 +240,6 @@ func WithAcceptedErrors(fn func(err error) bool) AdaptiveThrottleOption {
 	}}
 }
 
-// WithPriorityValidator sets the function that validates input priority values.
-//
-// The function should return the validated priority value. If the priority is
-// invalid, the function should return an error.
-func WithPriorityValidator(fn func(p Priority, priorities int) (Priority, error)) AdaptiveThrottleOption {
-	return AdaptiveThrottleOption{func(opts *adaptiveThrottleOptions) {
-		opts.validate = func(p Priority, priorities int) (Priority, error) {
-			p, err := fn(p, priorities)
-			if err != nil {
-				return p, err
-			}
-
-			// This is a safeguard in case the validator function does not return a
-			// valid priority. It is better to panic with this functions, because
-			// the message is more informative.
-			return OnInvalidPriorityPanic(p, priorities)
-		}
-	}}
-}
-
 func Throttle[T any](
 	ctx context.Context,
 	at *AdaptiveThrottle,
@@ -274,7 +247,7 @@ func Throttle[T any](
 	throttledFn throttledArgsFn[T],
 	fallbackFn ...fallbackArgsFn[T],
 ) (res T, err error) {
-	priority, err := at.validate(PriorityFromContext(ctx, defaultPriority), at.priorities)
+	priority, err := at.priorities.Validate(PriorityFromContext(ctx, defaultPriority))
 	if err != nil {
 		return res, err
 	}
@@ -336,7 +309,7 @@ func WithAdaptiveThrottle[T any](
 	priority Priority,
 	throttledFn func() (T, error),
 ) (res T, err error) {
-	priority, err = at.validate(priority, at.priorities)
+	priority, err = at.priorities.Validate(priority)
 	if err != nil {
 		return res, err
 	}
